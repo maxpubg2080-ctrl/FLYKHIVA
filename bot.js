@@ -161,18 +161,43 @@ async function setRouteSelect(page, name, value, leg, textPatterns, fallbackText
     log(`FlyKhiva ${leg} SELECT ${i}:`, info);
 
     if (info.found) {
-      await select.selectOption(String(info.value));
+      const applied = await select.evaluate((el, wantedValue) => {
+        const value = String(wantedValue);
+        const option = [...el.options].find(o => String(o.value) === value);
+        if (!option) {
+          return { ok: false, reason: "OPTION_DISAPPEARED" };
+        }
 
-      await select.evaluate(el => {
+        // FlyKhiva hides the native SELECT (Chosen/custom UI).
+        // Playwright's selectOption waits for visibility, so set the native
+        // value directly and fire the same DOM/jQuery events the page uses.
+        el.value = value;
+
         el.dispatchEvent(new Event("input", { bubbles: true }));
         el.dispatchEvent(new Event("change", { bubbles: true }));
         el.dispatchEvent(new Event("blur", { bubbles: true }));
 
         if (window.jQuery) {
-          window.jQuery(el).val(el.value);
+          window.jQuery(el).val(value);
           window.jQuery(el).trigger("change");
           window.jQuery(el).trigger("chosen:updated");
         }
+
+        return {
+          ok: true,
+          value: el.value,
+          text: option.textContent.trim(),
+          index: el.selectedIndex
+        };
+      }, String(info.value));
+
+      if (!applied.ok) {
+        throw new Error(`${name} option apply bo'lmadi: ${applied.reason}`);
+      }
+
+      await select.evaluate(el => {
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
       });
 
       await sleep(1000);
