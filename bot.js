@@ -3,9 +3,8 @@ const http = require("http");
 
 const PORT = process.env.PORT || 10000;
 
-const URL =
-  process.env.FLYKHIVA_URL ||
-  "https://b2b.flykhiva.travel/search_tour";
+const TICKETS_URL = "https://b2b.flykhiva.travel/tickets";
+const LOGIN_URL = "https://b2b.flykhiva.travel/search_tour?samo_action=logon";
 
 const LOGIN = process.env.FLYKHIVA_LOGIN;
 const PASSWORD = process.env.FLYKHIVA_PASSWORD;
@@ -13,9 +12,8 @@ const PASSWORD = process.env.FLYKHIVA_PASSWORD;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// FlyKhiva values confirmed from the user's console tests.
-const FROM_VALUE = process.env.FROM_VALUE || "1178.16"; // Sharm (SSH)
-const TO_VALUE = process.env.TO_VALUE || "1853.14";     // Toshkent (TAS)
+const FROM_VALUE = process.env.FROM_VALUE || "1178.16";
+const TO_VALUE = process.env.TO_VALUE || "1853.14";
 
 const POLL_SECONDS = Number(process.env.POLL_SECONDS || 300);
 
@@ -68,7 +66,7 @@ async function sendTelegram(message) {
 }
 
 async function login(page) {
-  await page.goto(`${URL}?samo_action=logon`, {
+  await page.goto(LOGIN_URL, {
     waitUntil: "domcontentloaded",
     timeout: 60000
   });
@@ -107,15 +105,20 @@ async function login(page) {
   await page.waitForLoadState("domcontentloaded").catch(() => {});
   await sleep(2500);
 
-  log("FlyKhiva LOGIN OK");
+  log("FlyKhiva LOGIN OK", { afterLoginUrl: page.url() });
+
+  // Always open the user-confirmed Charter Tickets page explicitly.
+  await page.goto(TICKETS_URL, {
+    waitUntil: "domcontentloaded",
+    timeout: 60000
+  });
+
+  await sleep(2500);
+
+  log("FlyKhiva TICKETS PAGE", { url: page.url() });
 }
 
-/**
- * Find the specific select that actually contains the requested option value.
- * There can be multiple select[name=TOWNFROMINC] / TOWNTOINC elements on the page.
- * We must NOT use .first(), because that may be a different/dummy selector.
- */
-async function setRouteSelect(page, name, value, leg, textPatterns = []) {
+async function setRouteSelect(page, name, value, leg, textPatterns, fallbackText) {
   const selects = page.locator(`select[name="${name}"]`);
   const count = await selects.count();
 
@@ -133,13 +136,10 @@ async function setRouteSelect(page, name, value, leg, textPatterns = []) {
       const patterns = data.patterns || [];
       const options = [...el.options];
 
-      let option = options.find(
-        o => String(o.value) === wantedValue
-      );
-
+      let option = options.find(o => String(o.value) === wantedValue);
       let matchedBy = option ? "value" : null;
 
-      if (!option && patterns.length) {
+      if (!option) {
         option = options.find(o => {
           const text = (o.textContent || "").trim().toLowerCase();
           return patterns.some(p => text.includes(String(p).toLowerCase()));
@@ -160,60 +160,102 @@ async function setRouteSelect(page, name, value, leg, textPatterns = []) {
 
     log(`FlyKhiva ${leg} SELECT ${i}:`, info);
 
-    if (!info.found) continue;
+    if (info.found) {
+      await select.selectOption(String(info.value));
 
-    await select.selectOption(String(info.value));
+      await select.evaluate(el => {
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        el.dispatchEvent(new Event("blur", { bubbles: true }));
 
-    await select.evaluate(el => {
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      el.dispatchEvent(new Event("blur", { bubbles: true }));
+        if (window.jQuery) {
+          window.jQuery(el).val(el.value);
+          window.jQuery(el).trigger("change");
+          window.jQuery(el).trigger("chosen:updated");
+        }
+      });
 
-      if (window.jQuery) {
-        window.jQuery(el).trigger("change");
-        window.jQuery(el).trigger("chosen:updated");
+      await sleep(1000);
+
+      const finalState = await select.evaluate(el => ({
+        name: el.name,
+        value: el.value,
+        text: el.options[el.selectedIndex]?.textContent?.trim() || "",
+        index: el.selectedIndex,
+        optionCount: el.options.length
+      }));
+
+      log(`FlyKhiva ${leg} OK:`, {
+        ...finalState,
+        matchedBy: info.matchedBy
+      });
+
+      return { ok: true, ...finalState, matchedBy: info.matchedBy };
+    }
+
+    // Fallback: the user's real browser session proves that the Charter page
+    // accepts these exact numeric values even when automation initially sees
+    // a different/default option set. Inject the known-good option and fire
+    // the same events the site uses for a normal selection.
+    if (i === 0) {
+      const injected = await select.evaluate((el, data) => {
+        const wanted = String(data.value);
+        let option = [...el.options].find(o => String(o.value) === wanted);
+
+        if (!option) {
+          option = document.createElement("option");
+          option.value = wanted;
+          option.textContent = data.text;
+          option.setAttribute("data-bot-injected", "true");
+          el.appendChild(option);
+        }
+
+        el.value = wanted;
+
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        el.dispatchEvent(new Event("blur", { bubbles: true }));
+
+        if (window.jQuery) {
+          window.jQuery(el).val(wanted);
+          window.jQuery(el).trigger("change");
+          window.jQuery(el).trigger("chosen:updated");
+        }
+
+        return {
+          value: el.value,
+          text: el.options[el.selectedIndex]?.textContent?.trim() || "",
+          optionCount: el.options.length
+        };
+      }, {
+        value,
+        text: fallbackText
+      });
+
+      await sleep(1200);
+
+      log(`FlyKhiva ${leg}: fallback option ishlatildi`, injected);
+
+      if (String(injected.value) === String(value)) {
+        const idx = await select.evaluate(el => el.selectedIndex);
+        return {
+          ok: true,
+          name,
+          value: injected.value,
+          text: injected.text,
+          index: idx,
+          optionCount: injected.optionCount,
+          matchedBy: "injected-value"
+        };
       }
-    });
-
-    await sleep(700);
-
-    const finalState = await select.evaluate(el => ({
-      name: el.name,
-      value: el.value,
-      text: el.options[el.selectedIndex]?.textContent?.trim() || "",
-      index: el.selectedIndex,
-      optionCount: el.options.length
-    }));
-
-    log(`FlyKhiva ${leg} OK:`, {
-      ...finalState,
-      matchedBy: info.matchedBy
-    });
-
-    return { ok: true, ...finalState, matchedBy: info.matchedBy };
+    }
   }
-
-  const summaries = [];
-
-  for (let i = 0; i < count; i++) {
-    const select = selects.nth(i);
-    const options = await select.evaluate(el =>
-      [...el.options].slice(0, 80).map(o => ({
-        value: o.value,
-        text: o.textContent.trim()
-      }))
-    );
-    summaries.push({ index: i, options });
-  }
-
-  log(`FlyKhiva ${leg} SELECT OPTIONS:`, summaries);
 
   return {
     ok: false,
     reason: "OPTION_NOT_FOUND",
     name,
-    value,
-    textPatterns: textPatterns.length ? textPatterns : undefined
+    value
   };
 }
 
@@ -223,11 +265,12 @@ async function setRoute(page) {
     "TOWNFROMINC",
     FROM_VALUE,
     "FROM",
-    ["sharm", "шарм", "ssh"]
+    ["sharm", "шарм", "ssh", "sharm-el-sheikh", "шарм-эль-шейх"],
+    "Sharm (SSH)"
   );
 
   if (!from.ok) {
-    log("FlyKhiva FROM: Sharm hozirgi sahifada mavjud emas. Bu route hozircha ochilmagan bo'lishi mumkin.");
+    log("FlyKhiva FROM: Sharm route tanlanmadi.");
     return false;
   }
 
@@ -238,15 +281,16 @@ async function setRoute(page) {
     "TOWNTOINC",
     TO_VALUE,
     "TO",
-    ["toshkent", "ташкент", "tashkent", "tas"]
+    ["toshkent", "ташкент", "tashkent", "tas"],
+    "Toshkent (TAS)"
   );
 
   if (!to.ok) {
-    log("FlyKhiva TO: Toshkent hozirgi sahifada mavjud emas.");
+    log("FlyKhiva TO: Toshkent route tanlanmadi.");
     return false;
   }
 
-  await sleep(1000);
+  await sleep(1200);
 
   log(`FlyKhiva ROUTE OK: Sharm -> Toshkent | ${from.value} -> ${to.value}`);
   return true;
@@ -289,14 +333,10 @@ async function setDate(page, dateText) {
     });
 
     if (!candidates.length) {
-      return {
-        ok: false,
-        reason: "DATE_INPUT_NOT_FOUND"
-      };
+      return { ok: false, reason: "DATE_INPUT_NOT_FOUND" };
     }
 
     const input = candidates[0];
-
     const setter = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       "value"
@@ -382,31 +422,23 @@ function parseFlightCards(cards) {
 
     const lower = text.toLowerCase();
 
-    // Never alert for a card that explicitly says no seats.
     if (lower.includes("нет мест")) {
       continue;
     }
 
-    // Availability must be explicit inside THIS flight card.
     const hasSeats =
       lower.includes("есть места") ||
-      lower.includes("места есть");
+      lower.includes("места есть") ||
+      lower.includes("мест мало");
 
     if (!hasSeats) continue;
 
-    // Price is parsed ONLY from THIS flight card.
     const price = parsePrice(text);
     if (!price) continue;
 
-    const date =
-      text.match(/\b\d{2}\.\d{2}\.\d{4}\b/)?.[0] || null;
-
-    const flight =
-      text.match(/\b[A-Z0-9]{2,3}-\d{3,5}\b/)?.[0] || null;
-
-    const times = [...text.matchAll(/\b\d{2}:\d{2}\b/g)].map(
-      match => match[0]
-    );
+    const date = text.match(/\b\d{2}\.\d{2}\.\d{4}\b/)?.[0] || null;
+    const flight = text.match(/\b[A-Z0-9]{2,3}-\d{3,5}\b/)?.[0] || null;
+    const times = [...text.matchAll(/\b\d{2}:\d{2}\b/g)].map(m => m[0]);
 
     results.push({
       date,
@@ -430,7 +462,6 @@ async function readFlightResults(page) {
     );
 
   log(`FlyKhiva flight cards: ${cards.length}`);
-
   return parseFlightCards(cards);
 }
 
@@ -440,12 +471,13 @@ async function checkDate(page, date) {
   log("");
   log(`===== TEKSHIRILMOQDA: ${dateText} =====`);
 
-  await page.goto(URL, {
+  await page.goto(TICKETS_URL, {
     waitUntil: "domcontentloaded",
     timeout: 60000
   });
 
-  await sleep(1500);
+  await sleep(1800);
+  log(`FlyKhiva DATE PAGE URL: ${page.url()}`);
 
   const routeReady = await setRoute(page);
 
@@ -474,15 +506,7 @@ async function checkDate(page, date) {
     const formattedAmount = Number(numericAmount).toLocaleString("en-US");
 
     const message =
-`🟢 HAQIQIY JOY BOR
-
-🏢 Sistema: FlyKhiva
-🛫 Yo'nalish: Sharm → Toshkent
-📅 Sana: ${result.date || dateText}
-✈️ Reys: ${result.flight || "Noma'lum"}
-🕐 Vaqt: ${timeText || "Noma'lum"}
-💺 Joy: BOR
-💰 Narx: ${formattedAmount} ${result.price.currency}`;
+`🟢 HAQIQIY JOY BOR\n\n🏢 Sistema: FlyKhiva\n🛫 Yo'nalish: Sharm → Toshkent\n📅 Sana: ${result.date || dateText}\n✈️ Reys: ${result.flight || "Noma'lum"}\n🕐 Vaqt: ${timeText || "Noma'lum"}\n💺 Joy: BOR\n💰 Narx: ${formattedAmount} ${result.price.currency}`;
 
     log("HAQIQIY JOY TOPILDI");
     log(message);
@@ -501,18 +525,11 @@ async function monitor() {
   let context = null;
 
   try {
-    if (!LOGIN) {
-      throw new Error("FLYKHIVA_LOGIN env mavjud emas.");
-    }
-
-    if (!PASSWORD) {
-      throw new Error("FLYKHIVA_PASSWORD env mavjud emas.");
-    }
+    if (!LOGIN) throw new Error("FLYKHIVA_LOGIN env mavjud emas.");
+    if (!PASSWORD) throw new Error("FLYKHIVA_PASSWORD env mavjud emas.");
 
     if (!browser) {
-      browser = await chromium.launch({
-        headless: true
-      });
+      browser = await chromium.launch({ headless: true });
     }
 
     context = await browser.newContext();
@@ -522,8 +539,6 @@ async function monitor() {
 
     const today = new Date();
 
-    // Check the next 30 calendar days.
-    // A date that does not exist / has no result is simply skipped.
     for (let i = 1; i <= 30; i++) {
       const date = addDays(today, i);
 
@@ -541,7 +556,6 @@ async function monitor() {
     if (context) {
       await context.close().catch(() => {});
     }
-
     busy = false;
   }
 }
@@ -551,7 +565,6 @@ http
     res.writeHead(200, {
       "content-type": "text/plain; charset=utf-8"
     });
-
     res.end("FlyKhiva bot ishlayapti");
   })
   .listen(PORT, () => {
