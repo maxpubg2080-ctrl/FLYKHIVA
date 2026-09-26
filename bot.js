@@ -115,49 +115,55 @@ async function login(page) {
  * There can be multiple select[name=TOWNFROMINC] / TOWNTOINC elements on the page.
  * We must NOT use .first(), because that may be a different/dummy selector.
  */
-async function setRouteSelect(page, name, value, leg) {
+async function setRouteSelect(page, name, value, leg, textPatterns = []) {
   const selects = page.locator(`select[name="${name}"]`);
   const count = await selects.count();
 
   log(`FlyKhiva ${leg}: ${count} ta ${name} select topildi`);
 
   if (!count) {
-    throw new Error(`${name} select topilmadi.`);
+    return { ok: false, reason: "SELECT_NOT_FOUND" };
   }
 
   for (let i = 0; i < count; i++) {
     const select = selects.nth(i);
 
-    const info = await select.evaluate((el, wantedValue) => {
+    const info = await select.evaluate((el, data) => {
+      const wantedValue = String(data.value);
+      const patterns = data.patterns || [];
       const options = [...el.options];
-      const option = options.find(
-        o => String(o.value) === String(wantedValue)
+
+      let option = options.find(
+        o => String(o.value) === wantedValue
       );
+
+      let matchedBy = option ? "value" : null;
+
+      if (!option && patterns.length) {
+        option = options.find(o => {
+          const text = (o.textContent || "").trim().toLowerCase();
+          return patterns.some(p => text.includes(String(p).toLowerCase()));
+        });
+        matchedBy = option ? "text" : null;
+      }
 
       return {
         found: Boolean(option),
+        matchedBy,
         value: option ? option.value : null,
         text: option ? option.textContent.trim() : null,
         optionCount: options.length,
         selectedValue: el.value,
-        visible: !!(
-          el.offsetWidth ||
-          el.offsetHeight ||
-          el.getClientRects().length
-        )
+        visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
       };
-    }, value);
+    }, { value, patterns: textPatterns });
 
     log(`FlyKhiva ${leg} SELECT ${i}:`, info);
 
-    if (!info.found) {
-      continue;
-    }
+    if (!info.found) continue;
 
-    // selectOption works even when the select itself is hidden.
-    await select.selectOption(String(value));
+    await select.selectOption(String(info.value));
 
-    // Fire the same events the website expects.
     await select.evaluate(el => {
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -174,49 +180,76 @@ async function setRouteSelect(page, name, value, leg) {
     const finalState = await select.evaluate(el => ({
       name: el.name,
       value: el.value,
-      text:
-        el.options[el.selectedIndex]?.textContent?.trim() || "",
+      text: el.options[el.selectedIndex]?.textContent?.trim() || "",
       index: el.selectedIndex,
       optionCount: el.options.length
     }));
 
-    log(`FlyKhiva ${leg} OK:`, finalState);
+    log(`FlyKhiva ${leg} OK:`, {
+      ...finalState,
+      matchedBy: info.matchedBy
+    });
 
-    return finalState;
+    return { ok: true, ...finalState, matchedBy: info.matchedBy };
   }
 
-  // Helpful diagnostics if the desired value disappears.
   const summaries = [];
 
   for (let i = 0; i < count; i++) {
     const select = selects.nth(i);
     const options = await select.evaluate(el =>
-      [...el.options].slice(0, 50).map(o => ({
+      [...el.options].slice(0, 80).map(o => ({
         value: o.value,
         text: o.textContent.trim()
       }))
     );
-
     summaries.push({ index: i, options });
   }
 
   log(`FlyKhiva ${leg} SELECT OPTIONS:`, summaries);
 
-  throw new Error(
-    `${name} ichida ${value} topilmadi.`
-  );
+  return {
+    ok: false,
+    reason: "OPTION_NOT_FOUND",
+    name,
+    value,
+    textPatterns: textPatterns.length ? textPatterns : undefined
+  };
 }
 
 async function setRoute(page) {
-  await setRouteSelect(page, "TOWNFROMINC", FROM_VALUE, "FROM");
-  await sleep(1000);
-
-  await setRouteSelect(page, "TOWNTOINC", TO_VALUE, "TO");
-  await sleep(1000);
-
-  log(
-    `FlyKhiva ROUTE OK: Sharm -> Toshkent | ${FROM_VALUE} -> ${TO_VALUE}`
+  const from = await setRouteSelect(
+    page,
+    "TOWNFROMINC",
+    FROM_VALUE,
+    "FROM",
+    ["sharm", "шарм", "ssh"]
   );
+
+  if (!from.ok) {
+    log("FlyKhiva FROM: Sharm hozirgi sahifada mavjud emas. Bu route hozircha ochilmagan bo'lishi mumkin.");
+    return false;
+  }
+
+  await sleep(1000);
+
+  const to = await setRouteSelect(
+    page,
+    "TOWNTOINC",
+    TO_VALUE,
+    "TO",
+    ["toshkent", "ташкент", "tashkent", "tas"]
+  );
+
+  if (!to.ok) {
+    log("FlyKhiva TO: Toshkent hozirgi sahifada mavjud emas.");
+    return false;
+  }
+
+  await sleep(1000);
+
+  log(`FlyKhiva ROUTE OK: Sharm -> Toshkent | ${from.value} -> ${to.value}`);
+  return true;
 }
 
 async function setDate(page, dateText) {
@@ -414,7 +447,13 @@ async function checkDate(page, date) {
 
   await sleep(1500);
 
-  await setRoute(page);
+  const routeReady = await setRoute(page);
+
+  if (!routeReady) {
+    log(`FlyKhiva ROUTE YO'Q: ${dateText} — natija tekshirilmaydi.`);
+    return;
+  }
+
   await setDate(page, dateText);
   await clickSearch(page);
 
