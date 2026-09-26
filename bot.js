@@ -756,13 +756,10 @@ function buildMessage(result, searchedDate, totalSeatsLabel) {
     : result.times.join(" → ");
 
   // Price always comes from the 1-adult confirmation search.
-  // When 10+ seats are confirmed, the user asked not to show price.
-  let priceLine = "";
-  if (totalSeatsLabel !== "10+") {
-    const numericAmount = result.price.amount.replace(/[^\d]/g, "");
-    const formattedAmount = Number(numericAmount).toLocaleString("en-US");
-    priceLine = `\n💰 Narx: ${formattedAmount} ${result.price.currency}`;
-  }
+  // Show the 1-adult price even when the confirmed seat count is 10+.
+  const numericAmount = result.price.amount.replace(/[^\d]/g, "");
+  const formattedAmount = Number(numericAmount).toLocaleString("en-US");
+  const priceLine = `\n💰 Narx: ${formattedAmount} ${result.price.currency}`;
 
   return `🟢 HAQIQIY JOY BOR
 
