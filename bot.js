@@ -17,6 +17,7 @@ const TO_VALUE = process.env.TO_VALUE || "1853.14";
 
 const POLL_SECONDS = Number(process.env.POLL_SECONDS || 300);
 const LOOKAHEAD_DAYS = Number(process.env.LOOKAHEAD_DAYS || 15);
+const FAST_SCAN = String(process.env.FAST_SCAN || "true").toLowerCase() !== "false";
 
 // Alert policy: at most 1 alert every 5 minutes and max 3 alerts in any 15-minute window.
 const MIN_ALERT_GAP_MS = 5 * 60 * 1000;
@@ -368,24 +369,35 @@ async function setAdultsCount(page, count) {
     const selects = [...document.querySelectorAll("select")];
 
     for (const el of selects) {
-      const surrounding = [
-        el.name || "",
-        el.id || "",
-        el.className || "",
+      const parentText = [
         el.parentElement?.innerText || "",
         el.closest("td,div,fieldset,form")?.innerText || ""
       ].join(" ").toLowerCase();
 
-      const adultByName = /adult|взросл|adults/.test(surrounding);
-      const hasWanted = [...el.options].some(o => String(o.value) === wanted || o.textContent.trim() === wanted);
+      const meta = [
+        el.name || "",
+        el.id || "",
+        el.className || ""
+      ].join(" ").toLowerCase();
 
-      if (!adultByName || !hasWanted) continue;
+      const isAdultSelect = /adult|взросл/.test(`${meta} ${parentText}`);
+      if (!isAdultSelect) continue;
 
-      const option = [...el.options].find(
-        o => String(o.value) === wanted || o.textContent.trim() === wanted
+      const option = [...el.options].find(o =>
+        String(o.value) === wanted ||
+        o.textContent.trim() === wanted
       );
 
-      if (!option) continue;
+      if (!option) {
+        return {
+          ok: false,
+          optionMissing: true,
+          name: el.name || "",
+          id: el.id || "",
+          maxOptions: el.options.length,
+          available: [...el.options].map(o => ({ value: o.value, text: o.textContent.trim() }))
+        };
+      }
 
       el.value = option.value;
       el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -394,29 +406,29 @@ async function setAdultsCount(page, count) {
 
       if (window.jQuery) {
         window.jQuery(el).val(option.value);
+        window.jQuery(el).trigger("input");
         window.jQuery(el).trigger("change");
         window.jQuery(el).trigger("chosen:updated");
       }
 
       return {
-        ok: true,
-        name: el.name,
-        id: el.id,
+        ok: String(el.value) === String(option.value),
+        name: el.name || "",
+        id: el.id || "",
         value: el.value,
         text: option.textContent.trim()
       };
     }
 
-    return { ok: false };
+    return { ok: false, reason: "ADULT_SELECT_NOT_FOUND" };
   }, wanted);
 
   log(`FlyKhiva ADULTS SET ${count}:`, result);
 
-  if (!result.ok) {
-    throw new Error(`Kattalar soni ${count} uchun select topilmadi.`);
-  }
+  if (!result.ok) return false;
 
-  await sleep(700);
+  await sleep(500);
+  return true;
 }
 
 async function setDate(page, dateText) {
@@ -675,28 +687,64 @@ async function findMatchingCard(page, baseResult) {
   return same || null;
 }
 
+async function searchSameFlightForAdults(page, count, baseResult) {
+  const setOk = await setAdultsCount(page, count);
+  if (!setOk) {
+    log(`FlyKhiva ADULTS ${count}: select bu sonni qabul qilmadi.`);
+    return null;
+  }
+
+  await clickSearch(page);
+  const matched = await findMatchingCard(page, baseResult);
+
+  if (!matched) {
+    log(`FlyKhiva SEAT TEST: ${count} ta kattada aynan shu reys topilmadi.`);
+    return null;
+  }
+
+  if (!matched.seat?.available) {
+    log(`FlyKhiva SEAT TEST YO'Q: ${count} ta kattalar uchun joy yetarli emas.`);
+    return null;
+  }
+
+  log(`FlyKhiva SEAT TEST OK: ${count} ta kattalar uchun shu reys mavjud.`);
+  return matched;
+}
+
 async function determineSeatCount(page, baseResult) {
-  // The flight is already confirmed with 1 adult.
-  // Now test 10, 9, 8 ... 2 adults until the same flight is no longer available.
-  // If 10 adults still works, report "10+".
+  // Fast mode: first test 10. If 10 works, report 10+ immediately.
+  // Otherwise use a binary search because seat availability is monotonic:
+  // if N adults can book the same flight, any smaller number should also work.
+  if (FAST_SCAN) {
+    const ten = await searchSameFlightForAdults(page, 10, baseResult);
+    if (ten) return "10+";
+
+    let low = 1;
+    let high = 9;
+    let best = 1;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const matched = await searchSameFlightForAdults(page, mid, baseResult);
+
+      if (matched) {
+        best = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    return `${best} ta`;
+  }
+
+  // Slow/compatibility mode: exact descending test 10 -> 2.
   for (let count = 10; count >= 2; count--) {
-    await setAdultsCount(page, count);
-    await clickSearch(page);
-
-    const matched = await findMatchingCard(page, baseResult);
-
-    if (matched && matched.seat?.available) {
-      log(`FlyKhiva SEAT TEST OK: ${count} ta kattalar uchun joy bor.`, {
-        flight: matched.flight,
-        date: matched.date,
-        seat: matched.seat
-      });
-
+    const matched = await searchSameFlightForAdults(page, count, baseResult);
+    if (matched) {
       if (count === 10) return "10+";
       return `${count} ta`;
     }
-
-    log(`FlyKhiva SEAT TEST YO'Q: ${count} ta kattalar uchun joy yetarli emas.`);
   }
 
   return "1 ta";
@@ -727,6 +775,22 @@ function buildMessage(result, searchedDate, totalSeatsLabel) {
 💺 Joy SONI: ${totalSeatsLabel}`;
 }
 
+function getTashkentStartDate() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Tashkent",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+
+  const value = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  return new Date(Date.UTC(
+    Number(value.year),
+    Number(value.month) - 1,
+    Number(value.day)
+  ));
+}
+
 async function monitor() {
   if (busy) {
     log("Oldingi tekshiruv hali tugamagan.");
@@ -747,7 +811,7 @@ async function monitor() {
 
     await login(page);
 
-    const start = new Date();
+    const start = getTashkentStartDate();
     let foundCount = 0;
 
     log(`FlyKhiva LOOKAHEAD: ${LOOKAHEAD_DAYS} kun`);
