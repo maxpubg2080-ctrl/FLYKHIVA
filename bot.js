@@ -66,7 +66,9 @@ async function sendTelegram(message) {
   const data = await response.json();
 
   if (!data.ok) {
-    throw new Error(`Telegram xato: ${JSON.stringify(data)}`);
+    throw new Error(
+      `Telegram xato: ${JSON.stringify(data)}`
+    );
   }
 }
 
@@ -112,96 +114,96 @@ async function login(page) {
   }
 
   await page.waitForLoadState("domcontentloaded").catch(() => {});
-  await sleep(2000);
+  await sleep(2500);
 
   log("FlyKhiva LOGIN OK");
 }
 
-async function setSelectByOptionValue(page, value, leg) {
-  const selectName =
-    leg === "FROM" ? "TOWNFROMINC" : "TOWNTOINC";
-
+async function setRouteSelect(page, name, value, leg) {
   const select = page.locator(
-    `select[name="${selectName}"]`
-  );
+    `select[name="${name}"]`
+  ).first();
 
-  try {
-    await select.waitFor({
-      state: "visible",
-      timeout: 15000
-    });
-  } catch {
+  const exists = await select.count();
+
+  if (!exists) {
     throw new Error(
-      `${selectName} select topilmadi yoki ko'rinmayapti.`
+      `${name} select topilmadi.`
     );
   }
 
-  let found = false;
+  let selected = false;
 
-  for (let i = 0; i < 20; i++) {
-    found = await select.evaluate(
-      (el, value) => {
-        return [...el.options].some(
-          option => String(option.value) === String(value)
+  for (let i = 0; i < 30; i++) {
+    selected = await select.evaluate(
+      (el, wantedValue) => {
+        const option = [...el.options].find(
+          o => String(o.value) === String(wantedValue)
         );
+
+        if (!option) {
+          return false;
+        }
+
+        el.value = String(wantedValue);
+
+        el.dispatchEvent(
+          new Event("input", {
+            bubbles: true
+          })
+        );
+
+        el.dispatchEvent(
+          new Event("change", {
+            bubbles: true
+          })
+        );
+
+        el.dispatchEvent(
+          new Event("blur", {
+            bubbles: true
+          })
+        );
+
+        if (window.jQuery) {
+          window.jQuery(el).val(String(wantedValue));
+          window.jQuery(el).trigger("change");
+          window.jQuery(el).trigger("chosen:updated");
+        }
+
+        return true;
       },
       value
     );
 
-    if (found) break;
+    if (selected) {
+      break;
+    }
 
     await sleep(500);
   }
 
-  if (!found) {
+  if (!selected) {
     const options = await select.evaluate(el =>
-      [...el.options].map(option => ({
-        value: option.value,
-        text: option.textContent.trim()
+      [...el.options].map(o => ({
+        value: o.value,
+        text: o.textContent.trim()
       }))
     );
 
-    log(`FlyKhiva ${leg} OPTIONS:`, options);
+    log(`${name} OPTIONS:`, options);
 
     throw new Error(
-      `${selectName} ichida ${value} topilmadi.`
+      `${name} ichida ${value} topilmadi.`
     );
   }
-
-  await select.selectOption(String(value));
-
-  await sleep(800);
-
-  await select.evaluate(el => {
-    el.dispatchEvent(
-      new Event("input", {
-        bubbles: true
-      })
-    );
-
-    el.dispatchEvent(
-      new Event("change", {
-        bubbles: true
-      })
-    );
-
-    el.dispatchEvent(
-      new Event("blur", {
-        bubbles: true
-      })
-    );
-
-    if (window.jQuery) {
-      window.jQuery(el).trigger("change");
-      window.jQuery(el).trigger("chosen:updated");
-    }
-  });
 
   const result = await select.evaluate(el => ({
     name: el.name,
     value: el.value,
     text:
-      el.options[el.selectedIndex]?.textContent?.trim() || "",
+      el.options[el.selectedIndex]?.textContent?.trim() ||
+      "",
     count: el.options.length
   }));
 
@@ -214,28 +216,35 @@ async function setSelectByOptionValue(page, value, leg) {
 }
 
 async function setRoute(page) {
-  await setSelectByOptionValue(
+  await setRouteSelect(
     page,
+    "TOWNFROMINC",
     FROM_VALUE,
     "FROM"
   );
 
   await sleep(1000);
 
-  await setSelectByOptionValue(
+  await setRouteSelect(
     page,
+    "TOWNTOINC",
     TO_VALUE,
     "TO"
   );
 
   await sleep(1000);
 
-  log("FlyKhiva ROUTE OK: Sharm -> Toshkent");
+  log(
+    "FlyKhiva ROUTE OK: Sharm -> Toshkent | " +
+    `${FROM_VALUE} -> ${TO_VALUE}`
+  );
 }
 
 async function setDate(page, dateText) {
   const result = await page.evaluate(dateText => {
-    const inputs = [...document.querySelectorAll("input")];
+    const inputs = [
+      ...document.querySelectorAll("input")
+    ];
 
     const visible = inputs.filter(el => {
       const style = window.getComputedStyle(el);
@@ -259,15 +268,14 @@ async function setDate(page, dateText) {
         .toLowerCase();
 
       return (
-        el.type === "date" ||
         info.includes("checkin") ||
         info.includes("check") ||
         info.includes("date") ||
         info.includes("depart") ||
-        info.includes("from") ||
         info.includes("when") ||
         info.includes("дата") ||
-        info.includes("когда")
+        info.includes("когда") ||
+        el.type === "date"
       );
     });
 
@@ -315,7 +323,10 @@ async function setDate(page, dateText) {
     };
   }, dateText);
 
-  log(`FlyKhiva DATE SET ${dateText}:`, result);
+  log(
+    `FlyKhiva DATE SET ${dateText}:`,
+    result
+  );
 
   if (!result.ok) {
     throw new Error(
@@ -338,7 +349,12 @@ async function clickSearch(page) {
       await submit.click();
       clicked = true;
       log("FlyKhiva SEARCH: submit.load");
-    } catch {}
+    } catch (error) {
+      log(
+        "submit.load bosilmadi:",
+        error.message
+      );
+    }
   }
 
   if (!clicked) {
@@ -354,10 +370,12 @@ async function clickSearch(page) {
   }
 
   if (!clicked) {
-    throw new Error("Search tugmasi topilmadi.");
+    throw new Error(
+      "Search tugmasi topilmadi."
+    );
   }
 
-  await sleep(3500);
+  await sleep(4000);
 }
 
 function parsePrice(text) {
@@ -387,12 +405,13 @@ function parseFlightCards(cards) {
 
     const lower = text.toLowerCase();
 
-    // Eng muhim tekshiruv:
-    // faqat karta ichida "есть места" bo'lsa joy bor deb hisoblaymiz.
+    // "нет мест" bo'lsa JOY YO'Q.
     if (lower.includes("нет мест")) {
       continue;
     }
 
+    // Faqat kartaning ichidagi aniq "есть места"
+    // yozuviga ishonamiz.
     const hasSeats =
       lower.includes("есть места") ||
       lower.includes("места есть");
@@ -401,7 +420,7 @@ function parseFlightCards(cards) {
       continue;
     }
 
-    // Narx faqat aynan flight card ichidan olinadi.
+    // Narx faqat aynan shu flight card ichidan olinadi.
     const price = parsePrice(text);
 
     if (!price) {
@@ -409,12 +428,14 @@ function parseFlightCards(cards) {
     }
 
     const date =
-      text.match(/\b\d{2}\.\d{2}\.\d{4}\b/)?.[0] ||
-      null;
+      text.match(
+        /\b\d{2}\.\d{2}\.\d{4}\b/
+      )?.[0] || null;
 
     const flight =
-      text.match(/\b[A-Z0-9]{2,3}-\d{3,5}\b/)?.[0] ||
-      null;
+      text.match(
+        /\b[A-Z0-9]{2,3}-\d{3,5}\b/
+      )?.[0] || null;
 
     const times = [
       ...text.matchAll(/\b\d{2}:\d{2}\b/g)
@@ -433,7 +454,9 @@ function parseFlightCards(cards) {
 
 async function readFlightResults(page) {
   const cards = await page
-    .locator(".flight.flight-most-relevant")
+    .locator(
+      ".flight.flight-most-relevant"
+    )
     .evaluateAll(elements =>
       elements.map(element => ({
         text: element.innerText || ""
@@ -472,7 +495,9 @@ async function checkDate(page, date) {
     await readFlightResults(page);
 
   if (!results.length) {
-    log(`JOY YO'Q: ${dateText}`);
+    log(
+      `JOY YO'Q: ${dateText}`
+    );
     return;
   }
 
@@ -483,7 +508,10 @@ async function checkDate(page, date) {
         : result.times.join(" → ");
 
     const numericAmount =
-      result.price.amount.replace(/[^\d]/g, "");
+      result.price.amount.replace(
+        /[^\d]/g,
+        ""
+      );
 
     const formattedAmount =
       Number(numericAmount).toLocaleString(
@@ -510,7 +538,9 @@ async function checkDate(page, date) {
 
 async function monitor() {
   if (busy) {
-    log("Oldingi tekshiruv hali tugamagan.");
+    log(
+      "Oldingi tekshiruv hali tugamagan."
+    );
     return;
   }
 
@@ -547,10 +577,16 @@ async function monitor() {
 
     // Keyingi 30 kunni tekshiramiz.
     for (let i = 1; i <= 30; i++) {
-      const date = addDays(today, i);
+      const date = addDays(
+        today,
+        i
+      );
 
       try {
-        await checkDate(page, date);
+        await checkDate(
+          page,
+          date
+        );
       } catch (error) {
         log(
           `Sana ${formatDate(date)} xato:`,
@@ -577,13 +613,18 @@ async function monitor() {
 http
   .createServer((req, res) => {
     res.writeHead(200, {
-      "content-type": "text/plain; charset=utf-8"
+      "content-type":
+        "text/plain; charset=utf-8"
     });
 
-    res.end("FlyKhiva bot ishlayapti");
+    res.end(
+      "FlyKhiva bot ishlayapti"
+    );
   })
   .listen(PORT, () => {
-    log(`Health server: ${PORT}`);
+    log(
+      `Health server: ${PORT}`
+    );
   });
 
 (async () => {
