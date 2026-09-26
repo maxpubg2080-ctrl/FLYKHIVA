@@ -1,0 +1,13 @@
+{
+  "name": "flykhiva-bot",
+  "version": "1.0.0",
+  "description": "FlyKhiva Telegram monitoring bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "playwright": "1.62.1",
+    "telegraf": "4.16.3"
+  }
+}
